@@ -1,6 +1,8 @@
 // 15 august 2015
 #import "uipriv_darwin.h"
 
+#define defaultStyleMask (NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask)
+
 struct uiWindow {
 	uiDarwinControl c;
 	NSWindow *window;
@@ -8,12 +10,25 @@ struct uiWindow {
 	int margined;
 	int (*onClosing)(uiWindow *, void *);
 	void *onClosingData;
+	struct singleChildConstraints constraints;
+	void (*onPositionChanged)(uiWindow *, void *);
+	void *onPositionChangedData;
+	BOOL suppressPositionChanged;
+	void (*onContentSizeChanged)(uiWindow *, void *);
+	void *onContentSizeChangedData;
+	BOOL suppressSizeChanged;
+	int fullscreen;
+	int borderless;
 };
 
 @interface windowDelegateClass : NSObject<NSWindowDelegate> {
 	struct mapTable *windows;
 }
 - (BOOL)windowShouldClose:(id)sender;
+- (void)windowDidMove:(NSNotification *)note;
+- (void)windowDidResize:(NSNotification *)note;
+- (void)windowDidEnterFullScreen:(NSNotification *)note;
+- (void)windowDidExitFullScreen:(NSNotification *)note;
 - (void)registerWindow:(uiWindow *)w;
 - (void)unregisterWindow:(uiWindow *)w;
 - (uiWindow *)lookupWindow:(NSWindow *)w;
@@ -46,6 +61,43 @@ struct uiWindow {
 	return NO;
 }
 
+// TODO doesn't happen live
+- (void)windowDidMove:(NSNotification *)note
+{
+	uiWindow *w;
+
+	w = [self lookupWindow:((NSWindow *) [note object])];
+	if (!w->suppressPositionChanged)
+		(*(w->onPositionChanged))(w, w->onPositionChangedData);
+}
+
+- (void)windowDidResize:(NSNotification *)note
+{
+	uiWindow *w;
+
+	w = [self lookupWindow:((NSWindow *) [note object])];
+	if (!w->suppressSizeChanged)
+		(*(w->onContentSizeChanged))(w, w->onContentSizeChangedData);
+}
+
+- (void)windowDidEnterFullScreen:(NSNotification *)note
+{
+	uiWindow *w;
+
+	w = [self lookupWindow:((NSWindow *) [note object])];
+	if (!w->suppressSizeChanged)
+		w->fullscreen = 1;
+}
+
+- (void)windowDidExitFullScreen:(NSNotification *)note
+{
+	uiWindow *w;
+
+	w = [self lookupWindow:((NSWindow *) [note object])];
+	if (!w->suppressSizeChanged)
+		w->fullscreen = 0;
+}
+
 - (void)registerWindow:(uiWindow *)w
 {
 	mapSet(self->windows, w->window, w);
@@ -62,7 +114,7 @@ struct uiWindow {
 {
 	uiWindow *v;
 
-	v = (uiWindow *) mapGet(self->windows, w);
+	v = uiWindow(mapGet(self->windows, w));
 	// this CAN (and IS ALLOWED TO) return NULL, just in case we're called with some OS X-provided window as the key window
 	return v;
 }
@@ -71,69 +123,126 @@ struct uiWindow {
 
 static windowDelegateClass *windowDelegate = nil;
 
-static void onDestroy(uiWindow *);
-
-uiDarwinDefineControlWithOnDestroy(
-	uiWindow,							// type name
-	uiWindowType,							// type function
-	window,								// handle
-	onDestroy(this);						// on destroy
-)
-
-static void onDestroy(uiWindow *w)
+static void removeConstraints(uiWindow *w)
 {
-	NSView *childView;
+	NSView *cv;
+
+	cv = [w->window contentView];
+	singleChildConstraintsRemove(&(w->constraints), cv);
+}
+
+static void uiWindowDestroy(uiControl *c)
+{
+	uiWindow *w = uiWindow(c);
 
 	// hide the window
 	[w->window orderOut:w->window];
+	removeConstraints(w);
 	if (w->child != NULL) {
-		childView = (NSView *) uiControlHandle(w->child);
-		[childView removeFromSuperview];
 		uiControlSetParent(w->child, NULL);
+		uiDarwinControlSetSuperview(uiDarwinControl(w->child), nil);
 		uiControlDestroy(w->child);
 	}
 	[windowDelegate unregisterWindow:w];
+	[w->window release];
+	uiFreeControl(uiControl(w));
 }
 
-static void windowCommitShow(uiControl *c)
+uiDarwinControlDefaultHandle(uiWindow, window)
+
+uiControl *uiWindowParent(uiControl *c)
+{
+	return NULL;
+}
+
+void uiWindowSetParent(uiControl *c, uiControl *parent)
+{
+	uiUserBugCannotSetParentOnToplevel("uiWindow");
+}
+
+static int uiWindowToplevel(uiControl *c)
+{
+	return 1;
+}
+
+static int uiWindowVisible(uiControl *c)
+{
+	uiWindow *w = uiWindow(c);
+
+	return [w->window isVisible];
+}
+
+static void uiWindowShow(uiControl *c)
 {
 	uiWindow *w = (uiWindow *) c;
 
 	[w->window makeKeyAndOrderFront:w->window];
 }
 
-static void windowCommitHide(uiControl *c)
+static void uiWindowHide(uiControl *c)
 {
 	uiWindow *w = (uiWindow *) c;
 
 	[w->window orderOut:w->window];
 }
 
-static void windowContainerUpdateState(uiControl *c)
+uiDarwinControlDefaultEnabled(uiWindow, window)
+uiDarwinControlDefaultEnable(uiWindow, window)
+uiDarwinControlDefaultDisable(uiWindow, window)
+
+static void uiWindowSyncEnableState(uiDarwinControl *c, int enabled)
 {
 	uiWindow *w = uiWindow(c);
 
+	if (uiDarwinShouldStopSyncEnableState(uiDarwinControl(w), enabled))
+		return;
 	if (w->child != NULL)
-		controlUpdateState(w->child);
+		uiDarwinControlSyncEnableState(uiDarwinControl(w->child), enabled);
 }
 
-static void windowRelayout(uiDarwinControl *c)
+static void uiWindowSetSuperview(uiDarwinControl *c, NSView *superview)
 {
-	uiWindow *w = uiWindow(c);
-	uiDarwinControl *cc;
+	// TODO
+}
+
+static void windowRelayout(uiWindow *w)
+{
 	NSView *childView;
 	NSView *contentView;
 
+	removeConstraints(w);
 	if (w->child == NULL)
 		return;
-	cc = uiDarwinControl(w->child);
 	childView = (NSView *) uiControlHandle(w->child);
 	contentView = [w->window contentView];
-	[contentView removeConstraints:[contentView constraints]];
-	// first relayout the child
-	(*(cc->Relayout))(cc);
-	// now relayout ourselves
-	layoutSingleView(contentView, childView, w->margined);
+	singleChildConstraintsEstablish(&(w->constraints),
+		contentView, childView,
+		uiDarwinControlHugsTrailingEdge(uiDarwinControl(w->child)),
+		uiDarwinControlHugsBottom(uiDarwinControl(w->child)),
+		w->margined,
+		@"uiWindow");
+}
+
+uiDarwinControlDefaultHugsTrailingEdge(uiWindow, window)
+uiDarwinControlDefaultHugsBottom(uiWindow, window)
+
+static void uiWindowChildEdgeHuggingChanged(uiDarwinControl *c)
+{
+	uiWindow *w = uiWindow(c);
+
+	windowRelayout(w);
+}
+
+// TODO
+uiDarwinControlDefaultHuggingPriority(uiWindow, window)
+uiDarwinControlDefaultSetHuggingPriority(uiWindow, window)
+// end TODO
+
+static void uiWindowChildVisibilityChanged(uiDarwinControl *c)
+{
+	uiWindow *w = uiWindow(c);
+
+	windowRelayout(w);
 }
 
 char *uiWindowTitle(uiWindow *w)
@@ -146,10 +255,119 @@ void uiWindowSetTitle(uiWindow *w, const char *title)
 	[w->window setTitle:toNSString(title)];
 }
 
+void uiWindowPosition(uiWindow *w, int *x, int *y)
+{
+	NSScreen *screen;
+	NSRect r;
+
+	r = [w->window frame];
+	*x = r.origin.x;
+	// this is the right screen to use; thanks mikeash in irc.freenode.net/#macdev
+	// -mainScreen is useless for positioning (it's just the key window's screen)
+	// and we use -frame, not -visibleFrame, for dealing with absolute positions
+	screen = (NSScreen *) [[NSScreen screens] objectAtIndex:0];
+	*y = ([screen frame].size.height - r.origin.y) - r.size.height;
+}
+
+void uiWindowSetPosition(uiWindow *w, int x, int y)
+{
+	// -[NSWindow setFrameTopLeftPoint:] is acting weird so...
+	NSRect r;
+	NSScreen *screen;
+
+	// this fires windowDidMove:
+	w->suppressPositionChanged = YES;
+	r = [w->window frame];
+	r.origin.x = x;
+	screen = (NSScreen *) [[NSScreen screens] objectAtIndex:0];
+	r.origin.y = [screen frame].size.height - (y + r.size.height);
+	[w->window setFrameOrigin:r.origin];
+	w->suppressPositionChanged = NO;
+}
+
+void uiWindowCenter(uiWindow *w)
+{
+	w->suppressPositionChanged = YES;
+	[w->window center];
+	w->suppressPositionChanged = NO;
+}
+
+void uiWindowOnPositionChanged(uiWindow *w, void (*f)(uiWindow *, void *), void *data)
+{
+	w->onPositionChanged = f;
+	w->onPositionChangedData = data;
+}
+
+void uiWindowContentSize(uiWindow *w, int *width, int *height)
+{
+	NSRect r;
+
+	r = [w->window contentRectForFrameRect:[w->window frame]];
+	*width = r.size.width;
+	*height = r.size.height;
+}
+
+void uiWindowSetContentSize(uiWindow *w, int width, int height)
+{
+	w->suppressSizeChanged = YES;
+	[w->window setContentSize:NSMakeSize(width, height)];
+	w->suppressSizeChanged = NO;
+}
+
+int uiWindowFullscreen(uiWindow *w)
+{
+	return w->fullscreen;
+}
+
+void uiWindowSetFullscreen(uiWindow *w, int fullscreen)
+{
+	if (w->fullscreen && fullscreen)
+		return;
+	if (!w->fullscreen && !fullscreen)
+		return;
+	w->fullscreen = fullscreen;
+	if (w->fullscreen && w->borderless)		// borderless doesn't play nice with fullscreen; don't toggle while borderless
+		return;
+	w->suppressSizeChanged = YES;
+	[w->window toggleFullScreen:w->window];
+	w->suppressSizeChanged = NO;
+	if (!w->fullscreen && w->borderless)		// borderless doesn't play nice with fullscreen; restore borderless after removing
+		[w->window setStyleMask:NSBorderlessWindowMask];
+}
+
+void uiWindowOnContentSizeChanged(uiWindow *w, void (*f)(uiWindow *, void *), void *data)
+{
+	w->onContentSizeChanged = f;
+	w->onContentSizeChangedData = data;
+}
+
 void uiWindowOnClosing(uiWindow *w, int (*f)(uiWindow *, void *), void *data)
 {
 	w->onClosing = f;
 	w->onClosingData = data;
+}
+
+int uiWindowBorderless(uiWindow *w)
+{
+	return w->borderless;
+}
+
+void uiWindowSetBorderless(uiWindow *w, int borderless)
+{
+	w->borderless = borderless;
+	if (w->borderless) {
+		// borderless doesn't play nice with fullscreen; wait for later
+		if (!w->fullscreen)
+			[w->window setStyleMask:NSBorderlessWindowMask];
+	} else {
+		[w->window setStyleMask:defaultStyleMask];
+		// borderless doesn't play nice with fullscreen; restore state
+		if (w->fullscreen) {
+			w->suppressSizeChanged = YES;
+			[w->window toggleFullScreen:w->window];
+			w->suppressSizeChanged = NO;
+		}
+	}
 }
 
 void uiWindowSetChild(uiWindow *w, uiControl *child)
@@ -165,9 +383,10 @@ void uiWindowSetChild(uiWindow *w, uiControl *child)
 	if (w->child != NULL) {
 		uiControlSetParent(w->child, uiControl(w));
 		childView = (NSView *) uiControlHandle(w->child);
-		[[w->window contentView] addSubview:childView];
-		uiDarwinControlTriggerRelayout(uiDarwinControl(w));
+		uiDarwinControlSetSuperview(uiDarwinControl(w->child), [w->window contentView]);
+		uiDarwinControlSyncEnableState(uiDarwinControl(w->child), uiControlEnabledToUser(uiControl(w)));
 	}
+	windowRelayout(w);
 }
 
 int uiWindowMargined(uiWindow *w)
@@ -178,13 +397,17 @@ int uiWindowMargined(uiWindow *w)
 void uiWindowSetMargined(uiWindow *w, int margined)
 {
 	w->margined = margined;
-	if (w->child != NULL)
-		uiDarwinControlTriggerRelayout(uiDarwinControl(w));
+	singleChildConstraintsSetMargined(&(w->constraints), w->margined);
 }
 
 static int defaultOnClosing(uiWindow *w, void *data)
 {
 	return 0;
+}
+
+static void defaultOnPositionContentSizeChanged(uiWindow *w, void *data)
+{
+	// do nothing
 }
 
 uiWindow *uiNewWindow(const char *title, int width, int height, int hasMenubar)
@@ -193,30 +416,26 @@ uiWindow *uiNewWindow(const char *title, int width, int height, int hasMenubar)
 
 	finalizeMenus();
 
-	w = (uiWindow *) uiNewControl(uiWindowType());
+	uiDarwinNewControl(uiWindow, w);
 
 	w->window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, (CGFloat) width, (CGFloat) height)
-		styleMask:(NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask)
+		styleMask:defaultStyleMask
 		backing:NSBackingStoreBuffered
 		defer:YES];
 	[w->window setTitle:toNSString(title)];
 
-	// explicitly release when closed
-	// the only thing that closes the window is us anyway
-	[w->window setReleasedWhenClosed:YES];
+	// do NOT release when closed
+	// we manually do this in uiWindowDestroy() above
+	[w->window setReleasedWhenClosed:NO];
 
 	if (windowDelegate == nil) {
-		windowDelegate = [windowDelegateClass new];
+		windowDelegate = [[windowDelegateClass new] autorelease];
 		[delegates addObject:windowDelegate];
 	}
 	[windowDelegate registerWindow:w];
 	uiWindowOnClosing(w, defaultOnClosing, NULL);
-
-	uiDarwinFinishNewControl(w, uiWindow);
-	uiControl(w)->CommitShow = windowCommitShow;
-	uiControl(w)->CommitHide = windowCommitHide;
-	uiControl(w)->ContainerUpdateState = windowContainerUpdateState;
-	uiDarwinControl(w)->Relayout = windowRelayout;
+	uiWindowOnPositionChanged(w, defaultOnPositionContentSizeChanged, NULL);
+	uiWindowOnContentSizeChanged(w, defaultOnPositionContentSizeChanged, NULL);
 
 	return w;
 }

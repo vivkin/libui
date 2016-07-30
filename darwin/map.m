@@ -22,7 +22,7 @@ struct mapTable *newMap(void)
 void mapDestroy(struct mapTable *m)
 {
 	if ([m->m count] != 0)
-		complain("attempt to destroy map with items inside; did you forget to deallocate something?");
+		implbug("attempt to destroy map with items inside");
 	[m->m release];
 	uiFree(m);
 }
@@ -40,4 +40,20 @@ void mapSet(struct mapTable *m, void *key, void *value)
 void mapDelete(struct mapTable *m, void *key)
 {
 	NSMapRemove(m->m, key);
+}
+
+void mapWalk(struct mapTable *m, void (*f)(void *key, void *value))
+{
+	NSMapEnumerator e = NSEnumerateMapTable(m->m);
+	void *k = NULL;
+	void *v = NULL;
+	while (NSNextMapEnumeratorPair(&e, &k, &v)) {
+		f(k, v);
+	}
+	NSEndMapTableEnumeration(&e);
+}
+
+void mapReset(struct mapTable *m)
+{
+	NSResetMapTable(m->m);
 }

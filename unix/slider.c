@@ -11,10 +11,7 @@ struct uiSlider {
 	gulong onChangedSignal;
 };
 
-uiUnixDefineControl(
-	uiSlider,								// type name
-	uiSliderType							// type function
-)
+uiUnixControlAllDefaults(uiSlider)
 
 static void onChanged(GtkRange *range, gpointer data)
 {
@@ -28,12 +25,12 @@ static void defaultOnChanged(uiSlider *s, void *data)
 	// do nothing
 }
 
-intmax_t uiSliderValue(uiSlider *s)
+int uiSliderValue(uiSlider *s)
 {
-	return (intmax_t) gtk_range_get_value(s->range);
+	return gtk_range_get_value(s->range);
 }
 
-void uiSliderSetValue(uiSlider *s, intmax_t value)
+void uiSliderSetValue(uiSlider *s, int value)
 {
 	// we need to inhibit sending of ::value-changed because this WILL send a ::value-changed otherwise
 	g_signal_handler_block(s->range, s->onChangedSignal);
@@ -47,23 +44,28 @@ void uiSliderOnChanged(uiSlider *s, void (*f)(uiSlider *, void *), void *data)
 	s->onChangedData = data;
 }
 
-uiSlider *uiNewSlider(intmax_t min, intmax_t max)
+uiSlider *uiNewSlider(int min, int max)
 {
 	uiSlider *s;
+	int temp;
 
-	s = (uiSlider *) uiNewControl(uiSliderType());
+	if (min >= max) {
+		temp = min;
+		min = max;
+		max = temp;
+	}
+
+	uiUnixNewControl(uiSlider, s);
 
 	s->widget = gtk_scale_new_with_range(GTK_ORIENTATION_HORIZONTAL, min, max, 1);
 	s->range = GTK_RANGE(s->widget);
 	s->scale = GTK_SCALE(s->widget);
 
-	// TODO needed?
+	// ensure integers, just to be safe
 	gtk_scale_set_digits(s->scale, 0);
 
 	s->onChangedSignal = g_signal_connect(s->scale, "value-changed", G_CALLBACK(onChanged), s);
 	uiSliderOnChanged(s, defaultOnChanged, NULL);
-
-	uiUnixFinishNewControl(s, uiSlider);
 
 	return s;
 }

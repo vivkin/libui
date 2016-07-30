@@ -11,16 +11,11 @@ struct uiTab {
 	GArray *pages;				// []*struct child
 };
 
-static void onDestroy(uiTab *);
+uiUnixControlAllDefaultsExceptDestroy(uiTab)
 
-uiUnixDefineControlWithOnDestroy(
-	uiTab,								// type name
-	uiTabType,							// type function
-	onDestroy(this);						// on destroy
-)
-
-static void onDestroy(uiTab *t)
+static void uiTabDestroy(uiControl *c)
 {
+	uiTab *t = uiTab(c);
 	guint i;
 	struct child *page;
 
@@ -29,16 +24,17 @@ static void onDestroy(uiTab *t)
 		childDestroy(page);
 	}
 	g_array_free(t->pages, TRUE);
+	// and free ourselves
+	g_object_unref(t->widget);
+	uiFreeControl(uiControl(t));
 }
-
-// TODO tabContainerUpdateState()
 
 void uiTabAppend(uiTab *t, const char *name, uiControl *child)
 {
 	uiTabInsertAt(t, name, t->pages->len, child);
 }
 
-void uiTabInsertAt(uiTab *t, const char *name, uintmax_t n, uiControl *child)
+void uiTabInsertAt(uiTab *t, const char *name, int n, uiControl *child)
 {
 	struct child *page;
 
@@ -51,7 +47,7 @@ void uiTabInsertAt(uiTab *t, const char *name, uintmax_t n, uiControl *child)
 	g_array_insert_val(t->pages, n, page);
 }
 
-void uiTabDelete(uiTab *t, uintmax_t n)
+void uiTabDelete(uiTab *t, int n)
 {
 	struct child *page;
 
@@ -61,12 +57,12 @@ void uiTabDelete(uiTab *t, uintmax_t n)
 	g_array_remove_index(t->pages, n);
 }
 
-uintmax_t uiTabNumPages(uiTab *t)
+int uiTabNumPages(uiTab *t)
 {
 	return t->pages->len;
 }
 
-int uiTabMargined(uiTab *t, uintmax_t n)
+int uiTabMargined(uiTab *t, int n)
 {
 	struct child *page;
 
@@ -74,7 +70,7 @@ int uiTabMargined(uiTab *t, uintmax_t n)
 	return childFlag(page);
 }
 
-void uiTabSetMargined(uiTab *t, uintmax_t n, int margined)
+void uiTabSetMargined(uiTab *t, int n, int margined)
 {
 	struct child *page;
 
@@ -87,7 +83,7 @@ uiTab *uiNewTab(void)
 {
 	uiTab *t;
 
-	t = (uiTab *) uiNewControl(uiTabType());
+	uiUnixNewControl(uiTab, t);
 
 	t->widget = gtk_notebook_new();
 	t->container = GTK_CONTAINER(t->widget);
@@ -96,9 +92,6 @@ uiTab *uiNewTab(void)
 	gtk_notebook_set_scrollable(t->notebook, TRUE);
 
 	t->pages = g_array_new(FALSE, TRUE, sizeof (struct child *));
-
-	uiUnixFinishNewControl(t, uiTab);
-//TODO	uiControl(t)->ContainerUpdateState = tabContainerUpdateState;
 
 	return t;
 }

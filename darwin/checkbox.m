@@ -1,8 +1,6 @@
 // 14 august 2015
 #import "uipriv_darwin.h"
 
-// TODO the intrinsic height of this seems to be wacky
-
 struct uiCheckbox {
 	uiDarwinControl c;
 	NSButton *button;
@@ -59,12 +57,16 @@ struct uiCheckbox {
 
 static checkboxDelegateClass *checkboxDelegate = nil;
 
-uiDarwinDefineControlWithOnDestroy(
-	uiCheckbox,								// type name
-	uiCheckboxType,							// type function
-	button,									// handle
-	[checkboxDelegate unregisterCheckbox:this];		// on destroy
-)
+uiDarwinControlAllDefaultsExceptDestroy(uiCheckbox, button)
+
+static void uiCheckboxDestroy(uiControl *cc)
+{
+	uiCheckbox *c = uiCheckbox(cc);
+
+	[checkboxDelegate unregisterCheckbox:c];
+	[c->button release];
+	uiFreeControl(uiControl(c));
+}
 
 char *uiCheckboxText(uiCheckbox *c)
 {
@@ -74,10 +76,6 @@ char *uiCheckboxText(uiCheckbox *c)
 void uiCheckboxSetText(uiCheckbox *c, const char *text)
 {
 	[c->button setTitle:toNSString(text)];
-	// this may result in the size of the checkbox changing
-	// TODO something somewhere is causing this to corrupt some memory so that, for instance, page7b's mouseExited: never triggers on 10.11; figure out what
-	// TODO is this related to map-related crashes?
-	uiDarwinControlTriggerRelayout(uiDarwinControl(c));
 }
 
 void uiCheckboxOnToggled(uiCheckbox *c, void (*f)(uiCheckbox *, void *), void *data)
@@ -110,22 +108,22 @@ uiCheckbox *uiNewCheckbox(const char *text)
 {
 	uiCheckbox *c;
 
-	c = (uiCheckbox *) uiNewControl(uiCheckboxType());
+	uiDarwinNewControl(uiCheckbox, c);
 
 	c->button = [[NSButton alloc] initWithFrame:NSZeroRect];
 	[c->button setTitle:toNSString(text)];
 	[c->button setButtonType:NSSwitchButton];
+	// doesn't seem to have an associated bezel style
 	[c->button setBordered:NO];
+	[c->button setTransparent:NO];
 	uiDarwinSetControlFont(c->button, NSRegularControlSize);
 
 	if (checkboxDelegate == nil) {
-		checkboxDelegate = [checkboxDelegateClass new];
+		checkboxDelegate = [[checkboxDelegateClass new] autorelease];
 		[delegates addObject:checkboxDelegate];
 	}
 	[checkboxDelegate registerCheckbox:c];
 	uiCheckboxOnToggled(c, defaultOnToggled, NULL);
-
-	uiDarwinFinishNewControl(c, uiCheckbox);
 
 	return c;
 }

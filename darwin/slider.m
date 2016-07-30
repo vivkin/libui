@@ -77,20 +77,23 @@ struct uiSlider {
 
 static sliderDelegateClass *sliderDelegate = nil;
 
-uiDarwinDefineControlWithOnDestroy(
-	uiSlider,								// type name
-	uiSliderType,							// type function
-	slider,								// handle
-	[sliderDelegate unregisterSlider:this];		// on destroy
-)
+uiDarwinControlAllDefaultsExceptDestroy(uiSlider, slider)
 
-intmax_t uiSliderValue(uiSlider *s)
+static void uiSliderDestroy(uiControl *c)
 {
-	// NSInteger is the most similar to intmax_t
+	uiSlider *s = uiSlider(c);
+
+	[sliderDelegate unregisterSlider:s];
+	[s->slider release];
+	uiFreeControl(uiControl(s));
+}
+
+int uiSliderValue(uiSlider *s)
+{
 	return [s->slider integerValue];
 }
 
-void uiSliderSetValue(uiSlider *s, intmax_t value)
+void uiSliderSetValue(uiSlider *s, int value)
 {
 	[s->slider setIntegerValue:value];
 }
@@ -106,12 +109,19 @@ static void defaultOnChanged(uiSlider *s, void *data)
 	// do nothing
 }
 
-uiSlider *uiNewSlider(intmax_t min, intmax_t max)
+uiSlider *uiNewSlider(int min, int max)
 {
 	uiSlider *s;
 	NSSliderCell *cell;
+	int temp;
 
-	s = (uiSlider *) uiNewControl(uiSliderType());
+	if (min >= max) {
+		temp = min;
+		min = max;
+		max = temp;
+	}
+
+	uiDarwinNewControl(uiSlider, s);
 
 	// a horizontal slider is defined as one where the width > height, not by a flag
 	// to be safe, don't use NSZeroRect, but make it horizontal from the get-go
@@ -127,13 +137,11 @@ uiSlider *uiNewSlider(intmax_t min, intmax_t max)
 	[cell setSliderType:NSLinearSlider];
 
 	if (sliderDelegate == nil) {
-		sliderDelegate = [sliderDelegateClass new];
+		sliderDelegate = [[sliderDelegateClass new] autorelease];
 		[delegates addObject:sliderDelegate];
 	}
 	[sliderDelegate registerSlider:s];
 	uiSliderOnChanged(s, defaultOnChanged, NULL);
-
-	uiDarwinFinishNewControl(s, uiSlider);
 
 	return s;
 }

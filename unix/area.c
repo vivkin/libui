@@ -41,8 +41,8 @@ struct uiArea {
 	uiAreaHandler *ah;
 
 	gboolean scrolling;
-	intmax_t scrollWidth;
-	intmax_t scrollHeight;
+	int scrollWidth;
+	int scrollHeight;
 
 	// note that this is a pointer; see above
 	clickCounter *cc;
@@ -53,7 +53,6 @@ G_DEFINE_TYPE(areaWidget, areaWidget, GTK_TYPE_DRAWING_AREA)
 static void areaWidget_init(areaWidget *aw)
 {
 	// for events
-	// TODO is this sufficient for enter-notify-event and leave-notify-event?
 	gtk_widget_add_events(GTK_WIDGET(aw),
 		GDK_POINTER_MOTION_MASK |
 		GDK_BUTTON_MOTION_MASK |
@@ -164,7 +163,6 @@ static void areaWidget_get_preferred_width(GtkWidget *w, gint *min, gint *nat)
 	}
 }
 
-// TODO merge with toModifiers?
 static guint translateModifiers(guint state, GdkWindow *window)
 {
 	GdkModifierType statetype;
@@ -252,7 +250,10 @@ static gboolean areaWidget_button_press_event(GtkWidget *w, GdkEventButton *e)
 		"gtk-double-click-time", &maxTime,
 		"gtk-double-click-distance", &maxDistance,
 		NULL);
-	// TODO unref settings?
+	// don't unref settings; it's transfer-none (thanks gregier in irc.gimp.net/#gtk+)
+	// e->time is guint32
+	// e->x and e->y are floating-point; just make them 32-bit integers
+	// maxTime and maxDistance... are gint, which *should* fit, hopefully...
 	me.Count = clickCounterClick(a->cc, me.Down,
 		e->x, e->y,
 		e->time, maxTime,
@@ -482,15 +483,12 @@ static void areaWidget_class_init(areaWidgetClass *class)
 
 // control implementation
 
-uiUnixDefineControl(
-	uiArea,								// type name
-	uiAreaType							// type function
-)
+uiUnixControlAllDefaults(uiArea)
 
-void uiAreaSetSize(uiArea *a, intmax_t width, intmax_t height)
+void uiAreaSetSize(uiArea *a, int width, int height)
 {
 	if (!a->scrolling)
-		complain("attempt to call uiAreaSetSize() on a non-scrolling uiArea");
+		userbug("You cannot call uiAreaSetSize() on a non-scrolling uiArea. (area: %p)", a);
 	a->scrollWidth = width;
 	a->scrollHeight = height;
 	gtk_widget_queue_resize(a->areaWidget);
@@ -501,11 +499,17 @@ void uiAreaQueueRedrawAll(uiArea *a)
 	gtk_widget_queue_draw(a->areaWidget);
 }
 
+void uiAreaScrollTo(uiArea *a, double x, double y, double width, double height)
+{
+	// TODO
+	// TODO adjust adjustments and find source for that
+}
+
 uiArea *uiNewArea(uiAreaHandler *ah)
 {
 	uiArea *a;
 
-	a = (uiArea *) uiNewControl(uiAreaType());
+	uiUnixNewControl(uiArea, a);
 
 	a->ah = ah;
 	a->scrolling = FALSE;
@@ -518,16 +522,14 @@ uiArea *uiNewArea(uiAreaHandler *ah)
 
 	a->widget = a->areaWidget;
 
-	uiUnixFinishNewControl(a, uiArea);
-
 	return a;
 }
 
-uiArea *uiNewScrollingArea(uiAreaHandler *ah, intmax_t width, intmax_t height)
+uiArea *uiNewScrollingArea(uiAreaHandler *ah, int width, int height)
 {
 	uiArea *a;
 
-	a = (uiArea *) uiNewControl(uiAreaType());
+	uiUnixNewControl(uiArea, a);
 
 	a->ah = ah;
 	a->scrolling = TRUE;
@@ -549,8 +551,6 @@ uiArea *uiNewScrollingArea(uiAreaHandler *ah, intmax_t width, intmax_t height)
 	gtk_container_add(a->scontainer, a->areaWidget);
 	// and make the area visible; only the scrolled window's visibility is controlled by libui
 	gtk_widget_show(a->areaWidget);
-
-	uiUnixFinishNewControl(a, uiArea);
 
 	return a;
 }

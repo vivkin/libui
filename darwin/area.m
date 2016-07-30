@@ -1,9 +1,14 @@
 // 9 september 2015
 #import "uipriv_darwin.h"
 
+// 10.8 fixups
+#define NSEventModifierFlags NSUInteger
+
 @interface areaView : NSView {
 	uiArea *libui_a;
 	NSTrackingArea *libui_ta;
+	NSSize libui_ss;
+	BOOL libui_enabled;
 }
 - (id)initWithFrame:(NSRect)r area:(uiArea *)a;
 - (uiModifiers)parseModifiers:(NSEvent *)e;
@@ -14,6 +19,9 @@
 - (int)doKeyUp:(NSEvent *)e;
 - (int)doFlagsChanged:(NSEvent *)e;
 - (void)setupNewTrackingArea;
+- (void)setScrollingSize:(NSSize)s;
+- (BOOL)isEnabled;
+- (void)setEnabled:(BOOL)e;
 @end
 
 struct uiArea {
@@ -21,15 +29,10 @@ struct uiArea {
 	NSView *view;			// either sv or area depending on whether it is scrolling
 	NSScrollView *sv;
 	areaView *area;
+	struct scrollViewData *d;
 	uiAreaHandler *ah;
 	BOOL scrolling;
 };
-
-uiDarwinDefineControl(
-	uiArea,								// type name
-	uiAreaType,							// type function
-	view									// handle
-)
 
 @implementation areaView
 
@@ -39,6 +42,8 @@ uiDarwinDefineControl(
 	if (self) {
 		self->libui_a = a;
 		[self setupNewTrackingArea];
+		self->libui_ss = r.size;
+		self->libui_enabled = YES;
 	}
 	return self;
 }
@@ -56,7 +61,6 @@ uiDarwinDefineControl(
 	dp.AreaWidth = 0;
 	dp.AreaHeight = 0;
 	if (!a->scrolling) {
-		// TODO frame or bounds?
 		dp.AreaWidth = [self frame].size.width;
 		dp.AreaHeight = [self frame].size.height;
 	}
@@ -102,7 +106,6 @@ uiDarwinDefineControl(
 
 - (void)setupNewTrackingArea
 {
-	// TODO NSTrackingAssumeInside?
 	self->libui_ta = [[NSTrackingArea alloc] initWithRect:[self bounds]
 		options:(NSTrackingMouseEnteredAndExited |
 			NSTrackingMouseMoved |
@@ -114,7 +117,6 @@ uiDarwinDefineControl(
 	[self addTrackingArea:self->libui_ta];
 }
 
-// TODO when do we call super here?
 - (void)updateTrackingAreas
 {
 	[self removeTrackingArea:self->libui_ta];
@@ -128,7 +130,7 @@ uiDarwinDefineControl(
 	uiArea *a = self->libui_a;
 	uiAreaMouseEvent me;
 	NSPoint point;
-	uintmax_t buttonNumber;
+	int buttonNumber;
 	NSUInteger pmb;
 	unsigned int i, max;
 
@@ -141,7 +143,6 @@ uiDarwinDefineControl(
 	me.AreaWidth = 0;
 	me.AreaHeight = 0;
 	if (!a->scrolling) {
-		// TODO frame or bounds?
 		me.AreaWidth = [self frame].size.width;
 		me.AreaHeight = [self frame].size.height;
 	}
@@ -186,11 +187,9 @@ uiDarwinDefineControl(
 		me.Held1To64 |= 2;
 	if (buttonNumber != 3 && (pmb & 2) != 0)
 		me.Held1To64 |= 4;
-	// buttons 4..64
+	// buttons 4..32
+	// https://developer.apple.com/library/mac/documentation/Carbon/Reference/QuartzEventServicesRef/index.html#//apple_ref/c/tdef/CGMouseButton says Quartz only supports up to 32 buttons
 	max = 32;
-	// TODO are the upper 32 bits just mirrored?
-//	if (sizeof (NSUInteger) == 8)
-//		max = 64;
 	for (i = 4; i <= max; i++) {
 		uint64_t j;
 
@@ -201,7 +200,8 @@ uiDarwinDefineControl(
 			me.Held1To64 |= j;
 	}
 
-	(*(a->ah->MouseEvent))(a->ah, a, &me);
+	if (self->libui_enabled)
+		(*(a->ah->MouseEvent))(a->ah, a, &me);
 }
 
 #define mouseEvent(name) \
@@ -224,14 +224,16 @@ mouseEvent(otherMouseUp)
 {
 	uiArea *a = self->libui_a;
 
-	(*(a->ah->MouseCrossed))(a->ah, a, 0);
+	if (self->libui_enabled)
+		(*(a->ah->MouseCrossed))(a->ah, a, 0);
 }
 
 - (void)mouseExited:(NSEvent *)e
 {
 	uiArea *a = self->libui_a;
 
-	(*(a->ah->MouseCrossed))(a->ah, a, 1);
+	if (self->libui_enabled)
+		(*(a->ah->MouseCrossed))(a->ah, a, 1);
 }
 
 // note: there is no equivalent to WM_CAPTURECHANGED on Mac OS X; there literally is no way to break a grab like that
@@ -302,7 +304,52 @@ mouseEvent(otherMouseUp)
 		[self setNeedsDisplay:YES];
 }
 
+- (void)setScrollingSize:(NSSize)s
+{
+	self->libui_ss = s;
+	[self invalidateIntrinsicContentSize];
+}
+
+- (NSSize)intrinsicContentSize
+{
+	if (!self->libui_a->scrolling)
+		return [super intrinsicContentSize];
+	return self->libui_ss;
+}
+
+- (BOOL)becomeFirstResponder
+{
+	return [self isEnabled];
+}
+
+- (BOOL)isEnabled
+{
+	return self->libui_enabled;
+}
+
+- (void)setEnabled:(BOOL)e
+{
+	self->libui_enabled = e;
+	if (!self->libui_enabled && [self window] != nil)
+		if ([[self window] firstResponder] == self)
+			[[self window] makeFirstResponder:nil];
+}
+
 @end
+
+uiDarwinControlAllDefaultsExceptDestroy(uiArea, view)
+
+static void uiAreaDestroy(uiControl *c)
+{
+	uiArea *a = uiArea(c);
+
+	if (a->scrolling)
+		scrollViewFreeData(a->sv, a->d);
+	[a->area release];
+	if (a->scrolling)
+		[a->sv release];
+	uiFreeControl(uiControl(a));
+}
 
 // called by subclasses of -[NSApplication sendEvent:]
 // by default, NSApplication eats some key events
@@ -334,11 +381,11 @@ int sendAreaEvents(NSEvent *e)
 	return 0;
 }
 
-void uiAreaSetSize(uiArea *a, intmax_t width, intmax_t height)
+void uiAreaSetSize(uiArea *a, int width, int height)
 {
 	if (!a->scrolling)
-		complain("attempt to call uiAreaSetSize() on a non-scrolling uiArea");
-	[a->area setFrameSize:NSMakeSize(width, height)];
+		userbug("You cannot call uiAreaSetSize() on a non-scrolling uiArea. (area: %p)", a);
+	[a->area setScrollingSize:NSMakeSize(width, height)];
 }
 
 void uiAreaQueueRedrawAll(uiArea *a)
@@ -346,11 +393,19 @@ void uiAreaQueueRedrawAll(uiArea *a)
 	[a->area setNeedsDisplay:YES];
 }
 
+void uiAreaScrollTo(uiArea *a, double x, double y, double width, double height)
+{
+	if (!a->scrolling)
+		userbug("You cannot call uiAreaScrollTo() on a non-scrolling uiArea. (area: %p)", a);
+	[a->area scrollRectToVisible:NSMakeRect(x, y, width, height)];
+	// don't worry about the return value; it just says whether scrolling was needed
+}
+
 uiArea *uiNewArea(uiAreaHandler *ah)
 {
 	uiArea *a;
 
-	a = (uiArea *) uiNewControl(uiAreaType());
+	uiDarwinNewControl(uiArea, a);
 
 	a->ah = ah;
 	a->scrolling = NO;
@@ -359,33 +414,32 @@ uiArea *uiNewArea(uiAreaHandler *ah)
 
 	a->view = a->area;
 
-	uiDarwinFinishNewControl(a, uiArea);
-
 	return a;
 }
 
-uiArea *uiNewScrollingArea(uiAreaHandler *ah, intmax_t width, intmax_t height)
+uiArea *uiNewScrollingArea(uiAreaHandler *ah, int width, int height)
 {
 	uiArea *a;
+	struct scrollViewCreateParams p;
 
-	a = (uiArea *) uiNewControl(uiAreaType());
+	uiDarwinNewControl(uiArea, a);
 
 	a->ah = ah;
 	a->scrolling = YES;
 
-	a->sv = [[NSScrollView alloc] initWithFrame:NSZeroRect];
-	// TODO configure a->sv for real
-	[a->sv setHasHorizontalScroller:YES];
-	[a->sv setHasVerticalScroller:YES];
-
 	a->area = [[areaView alloc] initWithFrame:NSMakeRect(0, 0, width, height)
 		area:a];
 
+	memset(&p, 0, sizeof (struct scrollViewCreateParams));
+	p.DocumentView = a->area;
+	p.BackgroundColor = [NSColor controlColor];
+	p.DrawsBackground = 1;
+	p.Bordered = NO;
+	p.HScroll = YES;
+	p.VScroll = YES;
+	a->sv = mkScrollView(&p, &(a->d));
+
 	a->view = a->sv;
-
-	[a->sv setDocumentView:a->area];
-
-	uiDarwinFinishNewControl(a, uiArea);
 
 	return a;
 }

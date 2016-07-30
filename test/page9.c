@@ -1,8 +1,6 @@
 // 22 december 2015
 #include "test.h"
 
-// TODO draw a rectangle pointing out where (10,10) is both to test initial colors and to figure out what the *real* ascent is
-
 static uiEntry *textString;
 static uiEntry *textFont;
 static uiEntry *textSize;
@@ -10,7 +8,6 @@ static uiCombobox *textWeight;
 static uiCombobox *textItalic;
 static uiCheckbox *textSmallCaps;
 static uiCombobox *textStretch;
-static uiCombobox *textGravity;
 static uiEntry *textWidth;
 static uiButton *textApply;
 static uiCheckbox *addLeading;
@@ -28,12 +25,17 @@ static double entryDouble(uiEntry *e)
 	return d;
 }
 
-// TODO this should be altered not to restore all state on exit so default text attributes can be checked
 static void drawGuides(uiDrawContext *c, uiDrawTextFontMetrics *m)
 {
 	uiDrawPath *p;
 	uiDrawBrush b;
 	uiDrawStrokeParams sp;
+	double leading;
+	double y;
+
+	leading = 0;
+	if (uiCheckboxChecked(addLeading))
+		leading = m->Leading;
 
 	memset(&b, 0, sizeof (uiDrawBrush));
 	b.Type = uiDrawBrushTypeSolid;
@@ -46,8 +48,10 @@ static void drawGuides(uiDrawContext *c, uiDrawTextFontMetrics *m)
 	uiDrawSave(c);
 
 	p = uiDrawNewPath(uiDrawFillModeWinding);
-	uiDrawPathNewFigure(p, 8, 10);
-	uiDrawPathLineTo(p, 8, 10 + m->Ascent);
+	y = 10;
+	uiDrawPathNewFigure(p, 8, y);
+	y += m->Ascent;
+	uiDrawPathLineTo(p, 8, y);
 	uiDrawPathEnd(p);
 	b.R = 0.94;
 	b.G = 0.5;
@@ -57,8 +61,9 @@ static void drawGuides(uiDrawContext *c, uiDrawTextFontMetrics *m)
 	uiDrawFreePath(p);
 
 	p = uiDrawNewPath(uiDrawFillModeWinding);
-	uiDrawPathNewFigure(p, 8, 10 + m->Ascent);
-	uiDrawPathLineTo(p, 8, 10 + m->Ascent + m->Descent);
+	uiDrawPathNewFigure(p, 8, y);
+	y += m->Descent;
+	uiDrawPathLineTo(p, 8, y);
 	uiDrawPathEnd(p);
 	b.R = 0.12;
 	b.G = 0.56;
@@ -67,6 +72,33 @@ static void drawGuides(uiDrawContext *c, uiDrawTextFontMetrics *m)
 	uiDrawStroke(c, p, &b, &sp);
 	uiDrawFreePath(p);
 
+	// and again for the second line
+	p = uiDrawNewPath(uiDrawFillModeWinding);
+	y += leading;
+	uiDrawPathNewFigure(p, 8, y);
+	y += m->Ascent;
+	uiDrawPathLineTo(p, 8, y);
+	uiDrawPathEnd(p);
+	b.R = 0.94;
+	b.G = 0.5;
+	b.B = 0.5;
+	b.A = 0.75;
+	uiDrawStroke(c, p, &b, &sp);
+	uiDrawFreePath(p);
+
+	p = uiDrawNewPath(uiDrawFillModeWinding);
+	uiDrawPathNewFigure(p, 8, y);
+	y += m->Descent;
+	uiDrawPathLineTo(p, 8, y);
+	uiDrawPathEnd(p);
+	b.R = 0.12;
+	b.G = 0.56;
+	b.B = 1.0;
+	b.A = 0.75;
+	uiDrawStroke(c, p, &b, &sp);
+	uiDrawFreePath(p);
+
+	// and a box to text layout top-left corners
 	p = uiDrawNewPath(uiDrawFillModeWinding);
 	uiDrawPathAddRectangle(p, 0, 0, 10, 10);
 	uiDrawPathEnd(p);
@@ -99,9 +131,7 @@ static void handlerDraw(uiAreaHandler *a, uiArea *area, uiAreaDrawParams *dp)
 	desc.Size = entryDouble(textSize);
 	desc.Weight = uiComboboxSelected(textWeight);
 	desc.Italic = uiComboboxSelected(textItalic);
-	desc.SmallCaps = uiCheckboxChecked(textSmallCaps);
 	desc.Stretch = uiComboboxSelected(textStretch);
-	desc.Gravity = uiComboboxSelected(textGravity);
 	font = uiDrawLoadClosestFont(&desc);
 	uiFreeText(family);
 	uiDrawTextFontGetMetrics(font, &metrics);
@@ -113,6 +143,8 @@ static void handlerDraw(uiAreaHandler *a, uiArea *area, uiAreaDrawParams *dp)
 	s = uiEntryText(textString);
 	layout = uiDrawNewTextLayout(s, font, width);
 	uiFreeText(s);
+	if (uiCheckboxChecked(textSmallCaps))
+		;	// TODO
 	ypos = 10;
 	uiDrawText(dp->Context, 10, ypos, layout);
 	// TODO make these optional?
@@ -229,15 +261,6 @@ uiBox *makePage9(void)
 	uiComboboxAppend(textStretch, "Ultra Expanded");
 	uiComboboxSetSelected(textStretch, uiDrawTextStretchNormal);
 	uiBoxAppend(hbox, uiControl(textStretch), 1);
-
-	textGravity = uiNewCombobox();
-	uiComboboxAppend(textGravity, "South");
-	uiComboboxAppend(textGravity, "East");
-	uiComboboxAppend(textGravity, "North");
-	uiComboboxAppend(textGravity, "West");
-	uiComboboxAppend(textGravity, "Auto");
-	uiComboboxSetSelected(textGravity, uiDrawTextGravitySouth);
-	uiBoxAppend(hbox, uiControl(textGravity), 1);
 
 	textWidth = uiNewEntry();
 	uiEntrySetText(textWidth, "-1");

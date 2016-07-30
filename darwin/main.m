@@ -2,6 +2,12 @@
 #import "uipriv_darwin.h"
 
 static BOOL canQuit = NO;
+static NSAutoreleasePool *globalPool;
+static applicationClass *app;
+static appDelegate *delegate;
+
+static BOOL (^isRunning)(void);
+static BOOL stepsIsRunning;
 
 @implementation applicationClass
 
@@ -10,6 +16,31 @@ static BOOL canQuit = NO;
 	if (sendAreaEvents(e) != 0)
 		return;
 	[super sendEvent:e];
+}
+
+// NSColorPanel always sends changeColor: to the first responder regardless of whether there's a target set on it
+// we can override it here (see colorbutton.m)
+// thanks to mikeash in irc.freenode.net/#macdev for informing me this is how the first responder chain is initiated
+// it turns out NSFontManager also sends changeFont: through this; let's inhibit that here too (see fontbutton.m)
+- (BOOL)sendAction:(SEL)sel to:(id)to from:(id)from
+{
+	if (colorButtonInhibitSendAction(sel, from, to))
+		return NO;
+	if (fontButtonInhibitSendAction(sel, from, to))
+		return NO;
+	return [super sendAction:sel to:to from:from];
+}
+
+// likewise, NSFontManager also sends NSFontPanelValidation messages to the first responder, however it does NOT use sendAction:from:to:!
+// instead, it uses this one (thanks swillits in irc.freenode.net/#macdev)
+// we also need to override it (see fontbutton.m)
+- (id)targetForAction:(SEL)sel to:(id)to from:(id)from
+{
+	id override;
+
+	if (fontButtonOverrideTargetForAction(sel, from, to, &override))
+		return override;
+	return [super targetForAction:sel to:to from:from];
 }
 
 // hey look! we're overriding terminate:!
@@ -25,7 +56,7 @@ static BOOL canQuit = NO;
 	NSEvent *e;
 
 	if (!canQuit)
-		complain("call to [NSApp terminate:] when not ready to terminate");
+		implbug("call to [NSApp terminate:] when not ready to terminate; definitely contact andlabs");
 
 	[realNSApp() stop:realNSApp()];
 	// stop: won't register until another event has passed; let's synthesize one
@@ -39,6 +70,9 @@ static BOOL canQuit = NO;
 		data1:0
 		data2:0];
 	[realNSApp() postEvent:e atStart:NO];		// let pending events take priority (this is what PostQuitMessage() on Windows does so we have to do it here too for parity; thanks to mikeash in irc.freenode.net/#macdev for confirming that this parameter should indeed be NO)
+
+	// and in case uiMainSteps() was called
+	stepsIsRunning = NO;
 }
 
 @end
@@ -47,7 +81,8 @@ static BOOL canQuit = NO;
 
 - (void)dealloc
 {
-	[self.menuManager release];
+	// Apple docs: "Don't Use Accessor Methods in Initializer Methods and dealloc"
+	[_menuManager release];
 	[super dealloc];
 }
 
@@ -74,30 +109,42 @@ uiInitOptions options;
 
 const char *uiInit(uiInitOptions *o)
 {
-	options = *o;
-	[applicationClass sharedApplication];
-	// don't check for a NO return; something (launch services?) causes running from application bundles to always return NO when asking to change activation policy, even if the change is to the same activation policy!
-	// see https://github.com/andlabs/ui/issues/6
-	[realNSApp() setActivationPolicy:NSApplicationActivationPolicyRegular];
-	[realNSApp() setDelegate:[appDelegate new]];
+	@autoreleasepool {
+		options = *o;
+		app = [[applicationClass sharedApplication] retain];
+		// don't check for a NO return; something (launch services?) causes running from application bundles to always return NO when asking to change activation policy, even if the change is to the same activation policy!
+		// see https://github.com/andlabs/ui/issues/6
+		[realNSApp() setActivationPolicy:NSApplicationActivationPolicyRegular];
+		delegate = [appDelegate new];
+		[realNSApp() setDelegate:delegate];
 
-	initAlloc();
+		initAlloc();
 
-	// always do this so we always have an application menu
-	appDelegate().menuManager = [menuManager new];
-	[realNSApp() setMainMenu:[appDelegate().menuManager makeMenubar]];
+		// always do this so we always have an application menu
+		appDelegate().menuManager = [[menuManager new] autorelease];
+		[realNSApp() setMainMenu:[appDelegate().menuManager makeMenubar]];
+
+		setupFontPanel();
+	}
+
+	globalPool = [[NSAutoreleasePool alloc] init];
 
 	return NULL;
 }
 
 void uiUninit(void)
 {
-	uninitMenus();
-	[realNSApp() setDelegate:nil];
-	[appDelegate() release];
-	[realNSApp() release];
-	uninitTypes();
-	uninitAlloc();
+	if (!globalPool) {
+		userbug("You must call uiInit() first!");
+	}
+	[globalPool release];
+
+	@autoreleasepool {
+		[delegate release];
+		[realNSApp() setDelegate:nil];
+		[app release];
+		uninitAlloc();
+	}
 }
 
 void uiFreeInitError(const char *err)
@@ -106,10 +153,59 @@ void uiFreeInitError(const char *err)
 
 void uiMain(void)
 {
+	isRunning = ^{
+		return [realNSApp() isRunning];
+	};
 	[realNSApp() run];
 }
 
-// TODO make this delayed
+void uiMainSteps(void)
+{
+	isRunning = ^{
+		return stepsIsRunning;
+	};
+	stepsIsRunning = YES;
+}
+
+// see also:
+// - http://www.cocoawithlove.com/2009/01/demystifying-nsapplication-by.html
+// - https://github.com/gnustep/gui/blob/master/Source/NSApplication.m
+int uiMainStep(int wait)
+{
+	NSDate *expire;
+	NSEvent *e;
+	NSEventType type;
+
+	@autoreleasepool {
+		// ProPuke did this in his original PR requesting this
+		// I'm not sure if this will work, but I assume it will...
+		expire = [NSDate distantPast];
+		if (wait)		// but this is normal so it will work
+			expire = [NSDate distantFuture];
+
+		if (!isRunning())
+			return 0;
+
+		e = [realNSApp() nextEventMatchingMask:NSAnyEventMask
+			untilDate:expire
+			inMode:NSDefaultRunLoopMode
+			dequeue:YES];
+		if (e == nil)
+			return 1;
+
+		type = [e type];
+		[realNSApp() sendEvent:e];
+		[realNSApp() updateWindows];
+
+		// GNUstep does this
+		// it also updates the Services menu but there doesn't seem to be a public API for that so
+		if (type != NSPeriodic && type != NSMouseMoved)
+			[[realNSApp() mainMenu] update];
+
+		return 1;
+	}
+}
+
 void uiQuit(void)
 {
 	canQuit = YES;
@@ -117,7 +213,7 @@ void uiQuit(void)
 }
 
 // thanks to mikeash in irc.freenode.net/#macdev for suggesting the use of Grand Central Dispatch for this
-// TODO will dispatch_get_main_queue() break after _CFRunLoopSetCurrent()?
+// LONGTERM will dispatch_get_main_queue() break after _CFRunLoopSetCurrent()?
 void uiQueueMain(void (*f)(void *data), void *data)
 {
 	// dispatch_get_main_queue() is a serial queue so it will not execute multiple uiQueueMain() functions concurrently

@@ -57,12 +57,16 @@ struct uiButton {
 
 static buttonDelegateClass *buttonDelegate = nil;
 
-uiDarwinDefineControlWithOnDestroy(
-	uiButton,								// type name
-	uiButtonType,							// type function
-	button,								// handle
-	[buttonDelegate unregisterButton:this];		// on destroy
-)
+uiDarwinControlAllDefaultsExceptDestroy(uiButton, button)
+
+static void uiButtonDestroy(uiControl *c)
+{
+	uiButton *b = uiButton(c);
+
+	[buttonDelegate unregisterButton:b];
+	[b->button release];
+	uiFreeControl(uiControl(b));
+}
 
 char *uiButtonText(uiButton *b)
 {
@@ -72,8 +76,6 @@ char *uiButtonText(uiButton *b)
 void uiButtonSetText(uiButton *b, const char *text)
 {
 	[b->button setTitle:toNSString(text)];
-	// this may result in the size of the button changing
-	uiDarwinControlTriggerRelayout(uiDarwinControl(b));
 }
 
 void uiButtonOnClicked(uiButton *b, void (*f)(uiButton *, void *), void *data)
@@ -91,7 +93,7 @@ uiButton *uiNewButton(const char *text)
 {
 	uiButton *b;
 
-	b = (uiButton *) uiNewControl(uiButtonType());
+	uiDarwinNewControl(uiButton, b);
 
 	b->button = [[NSButton alloc] initWithFrame:NSZeroRect];
 	[b->button setTitle:toNSString(text)];
@@ -101,13 +103,11 @@ uiButton *uiNewButton(const char *text)
 	uiDarwinSetControlFont(b->button, NSRegularControlSize);
 
 	if (buttonDelegate == nil) {
-		buttonDelegate = [buttonDelegateClass new];
+		buttonDelegate = [[buttonDelegateClass new] autorelease];
 		[delegates addObject:buttonDelegate];
 	}
 	[buttonDelegate registerButton:b];
 	uiButtonOnClicked(b, defaultOnClicked, NULL);
-
-	uiDarwinFinishNewControl(b, uiButton);
 
 	return b;
 }

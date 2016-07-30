@@ -1,8 +1,7 @@
 // 22 december 2015
-// Before we begin, you may be wondering why this file is C++.
-// Simple: <dwrite.h> is C++ only! Thanks Microsoft!
-// And unlike UI Automation which accidentally just forgets the 'struct' and 'enum' tags in places, <dwrite.h> is a full C++ header file, with class definitions and the use of __uuidof. Oh well :/
-#include "uipriv_windows.h"
+#include "uipriv_windows.hpp"
+#include "draw.hpp"
+// TODO really migrate
 
 // notes:
 // only available in windows 8 and newer:
@@ -11,100 +10,44 @@
 // - justficiation (how could I possibly be making this up?!)
 // - vertical text (SERIOUSLY?! WHAT THE ACTUAL FUCK, MICROSOFT?!?!?!? DID YOU NOT THINK ABOUT THIS THE FIRST TIME, TRYING TO IMPROVE THE INTERNATIONALIZATION OF WINDOWS 7?!?!?! bonus: some parts of MSDN even say 8.1 and up only!)
 
-static IDWriteFactory *dwfactory = NULL;
-
-HRESULT initDrawText(void)
-{
-	// TOOD use DWRITE_FACTORY_TYPE_ISOLATED instead?
-	return DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
-		__uuidof (IDWriteFactory),
-		(IUnknown **) (&dwfactory));
-}
-
-void uninitDrawText(void)
-{
-	dwfactory->Release();
-}
-
 struct uiDrawFontFamilies {
-	IDWriteFontCollection *fonts;
-	WCHAR userLocale[LOCALE_NAME_MAX_LENGTH];
-	int userLocaleSuccess;
+	fontCollection *fc;
 };
 
 uiDrawFontFamilies *uiDrawListFontFamilies(void)
 {
-	uiDrawFontFamilies *ff;
-	HRESULT hr;
+	struct uiDrawFontFamilies *ff;
 
-	ff = uiNew(uiDrawFontFamilies);
-	// always get the latest available font information
-	hr = dwfactory->GetSystemFontCollection(&(ff->fonts), TRUE);
-	if (hr != S_OK)
-		logHRESULT("error getting system font collection in uiDrawListFontFamilies()", hr);
-	ff->userLocaleSuccess = GetUserDefaultLocaleName(ff->userLocale, LOCALE_NAME_MAX_LENGTH);
+	ff = uiNew(struct uiDrawFontFamilies);
+	ff->fc = loadFontCollection();
 	return ff;
 }
 
-uintmax_t uiDrawFontFamiliesNumFamilies(uiDrawFontFamilies *ff)
+int uiDrawFontFamiliesNumFamilies(uiDrawFontFamilies *ff)
 {
-	return ff->fonts->GetFontFamilyCount();
+	return ff->fc->fonts->GetFontFamilyCount();
 }
 
-char *uiDrawFontFamiliesFamily(uiDrawFontFamilies *ff, uintmax_t n)
+char *uiDrawFontFamiliesFamily(uiDrawFontFamilies *ff, int n)
 {
 	IDWriteFontFamily *family;
-	IDWriteLocalizedStrings *names;
-	UINT32 index;
-	BOOL exists;
-	UINT32 length;
 	WCHAR *wname;
 	char *name;
 	HRESULT hr;
 
-	hr = ff->fonts->GetFontFamily(n, &family);
+	hr = ff->fc->fonts->GetFontFamily(n, &family);
 	if (hr != S_OK)
-		logHRESULT("error getting font out of collection in uiDrawFontFamiliesFamily()", hr);
-	hr = family->GetFamilyNames(&names);
-	if (hr != S_OK)
-		logHRESULT("error getting names of font out in uiDrawFontFamiliesFamily()", hr);
-
-	// this is complex, but we ignore failure conditions to allow fallbacks
-	// 1) If the user locale name was successfully retrieved, try it
-	// 2) If the user locale name was not successfully retrieved, or that locale's string does not exist, or an error occurred, try L"en-us", the US English locale
-	// 3) And if that fails, assume the first one
-	// This algorithm is straight from MSDN: https://msdn.microsoft.com/en-us/library/windows/desktop/dd368214%28v=vs.85%29.aspx
-	// For step 2 to work, start by setting hr to S_OK and exists to FALSE.
-	// TODO does it skip step 2 entirely if step 1 fails? rewrite it to be a more pure conversion of the MSDN code?
-	hr = S_OK;
-	exists = FALSE;
-	if (ff->userLocaleSuccess != 0)
-		hr = names->FindLocaleName(ff->userLocale, &index, &exists);
-	if (hr != S_OK || (hr == S_OK && !exists))
-		hr = names->FindLocaleName(L"en-us", &index, &exists);
-	if (!exists)
-		index = 0;
-
-	hr = names->GetStringLength(index, &length);
-	if (hr != S_OK)
-		logHRESULT("error getting length of font name in uiDrawFontFamiliesFamily()", hr);
-	// GetStringLength() does not include the null terminator, but GetString() does
-	wname = (WCHAR *) uiAlloc((length + 1) * sizeof (WCHAR), "WCHAR[]");
-	hr = names->GetString(index, wname, length + 1);
-	if (hr != S_OK)
-		logHRESULT("error getting font name in uiDrawFontFamiliesFamily()", hr);
-
+		logHRESULT(L"error getting font out of collection", hr);
+	wname = fontCollectionFamilyName(ff->fc, family);
 	name = toUTF8(wname);
-
 	uiFree(wname);
-	names->Release();
 	family->Release();
 	return name;
 }
 
 void uiDrawFreeFontFamilies(uiDrawFontFamilies *ff)
 {
-	ff->fonts->Release();
+	fontCollectionFree(ff->fc);
 	uiFree(ff);
 }
 
@@ -114,9 +57,30 @@ struct uiDrawTextFont {
 	double size;
 };
 
-// Not only does C++11 NOT include C99 designated initializers, but the C++ standards committee has REPEATEDLY REJECTING THEM, covering their ears and yelling "CONSTRUCTORS!!!111 PRIVATE DATA!1111 ENCAPSULATION!11one" at the top of their lungs.
-// So what could have been a simple array lookup is now a loop. Thanks guys.
+uiDrawTextFont *mkTextFont(IDWriteFont *df, BOOL addRef, WCHAR *family, BOOL copyFamily, double size)
+{
+	uiDrawTextFont *font;
+	WCHAR *copy;
+	HRESULT hr;
 
+	font = uiNew(uiDrawTextFont);
+	font->f = df;
+	if (addRef)
+		font->f->AddRef();
+	if (copyFamily) {
+		copy = (WCHAR *) uiAlloc((wcslen(family) + 1) * sizeof (WCHAR), "WCHAR[]");
+		wcscpy(copy, family);
+		font->family = copy;
+	} else
+		font->family = family;
+	font->size = size;
+	return font;
+}
+
+// TODO consider moving these all to dwrite.cpp
+
+// TODO MinGW-w64 is missing this one
+#define DWRITE_FONT_WEIGHT_SEMI_LIGHT (DWRITE_FONT_WEIGHT(350))
 static const struct {
 	bool lastOne;
 	uiDrawTextWeight uival;
@@ -161,41 +125,15 @@ static const struct {
 	{ true, uiDrawTextStretchUltraExpanded, DWRITE_FONT_STRETCH_ULTRA_EXPANDED },
 };
 
-uiDrawTextFont *uiDrawLoadClosestFont(const uiDrawTextFontDescriptor *desc)
+void attrToDWriteAttr(struct dwriteAttr *attr)
 {
-	uiDrawTextFont *font;
-	IDWriteFontCollection *collection;
-	UINT32 index;
-	BOOL exists;
-	DWRITE_FONT_WEIGHT weight;
-	DWRITE_FONT_STYLE italic;
-	DWRITE_FONT_STRETCH stretch;
 	bool found;
 	int i;
-	IDWriteFontFamily *family;
-	HRESULT hr;
-
-	font = uiNew(uiDrawTextFont);
-
-	// always get the latest available font information
-	hr = dwfactory->GetSystemFontCollection(&collection, TRUE);
-	if (hr != S_OK)
-		logHRESULT("error getting system font collection in uiDrawLoadClosestFont()", hr);
-
-	font->family = toUTF16(desc->Family);
-	hr = collection->FindFamilyName(font->family, &index, &exists);
-	if (hr != S_OK)
-		logHRESULT("error finding font family in uiDrawLoadClosestFont()", hr);
-	if (!exists)
-		complain("TODO family not found in uiDrawLoadClosestFont()", hr);
-	hr = collection->GetFontFamily(index, &family);
-	if (hr != S_OK)
-		logHRESULT("error loading font family in uiDrawLoadClosestFont()", hr);
 
 	found = false;
 	for (i = 0; ; i++) {
-		if (dwriteWeights[i].uival == desc->Weight) {
-			weight = dwriteWeights[i].dwval;
+		if (dwriteWeights[i].uival == attr->weight) {
+			attr->dweight = dwriteWeights[i].dwval;
 			found = true;
 			break;
 		}
@@ -203,12 +141,12 @@ uiDrawTextFont *uiDrawLoadClosestFont(const uiDrawTextFontDescriptor *desc)
 			break;
 	}
 	if (!found)
-		complain("invalid initial weight %d passed to uiDrawLoadClosestFont()", desc->Weight);
+		userbug("Invalid text weight %d passed to text function.", attr->weight);
 
 	found = false;
 	for (i = 0; ; i++) {
-		if (dwriteItalics[i].uival == desc->Italic) {
-			italic = dwriteItalics[i].dwval;
+		if (dwriteItalics[i].uival == attr->italic) {
+			attr->ditalic = dwriteItalics[i].dwval;
 			found = true;
 			break;
 		}
@@ -216,12 +154,12 @@ uiDrawTextFont *uiDrawLoadClosestFont(const uiDrawTextFontDescriptor *desc)
 			break;
 	}
 	if (!found)
-		complain("invalid initial italic %d passed to uiDrawLoadClosestFont()", desc->Italic);
+		userbug("Invalid text italic %d passed to text function.", attr->italic);
 
 	found = false;
 	for (i = 0; ; i++) {
-		if (dwriteStretches[i].uival == desc->Stretch) {
-			stretch = dwriteStretches[i].dwval;
+		if (dwriteStretches[i].uival == attr->stretch) {
+			attr->dstretch = dwriteStretches[i].dwval;
 			found = true;
 			break;
 		}
@@ -229,18 +167,106 @@ uiDrawTextFont *uiDrawLoadClosestFont(const uiDrawTextFontDescriptor *desc)
 			break;
 	}
 	if (!found)
-		complain("invalid initial stretch %d passed to uiDrawLoadClosestFont()", desc->Stretch);
+		// TODO on other platforms too
+		userbug("Invalid text stretch %d passed to text function.", attr->stretch);
+}
 
-	// TODO small caps and gravity
+void dwriteAttrToAttr(struct dwriteAttr *attr)
+{
+	int weight, against, n;
+	int curdiff, curindex;
+	bool found;
+	int i;
 
-	hr = family->GetFirstMatchingFont(weight,
-		stretch,
-		italic,
-		&(font->f));
+	// weight is scaled; we need to test to see what's nearest
+	weight = (int) (attr->dweight);
+	against = (int) (dwriteWeights[0].dwval);
+	curdiff = abs(against - weight);
+	curindex = 0;
+	for (i = 1; ; i++) {
+		against = (int) (dwriteWeights[i].dwval);
+		n = abs(against - weight);
+		if (n < curdiff) {
+			curdiff = n;
+			curindex = i;
+		}
+		if (dwriteWeights[i].lastOne)
+			break;
+	}
+	attr->weight = dwriteWeights[i].uival;
+
+	// italic and stretch are simple values; we can just do a matching search
+	found = false;
+	for (i = 0; ; i++) {
+		if (dwriteItalics[i].dwval == attr->ditalic) {
+			attr->italic = dwriteItalics[i].uival;
+			found = true;
+			break;
+		}
+		if (dwriteItalics[i].lastOne)
+			break;
+	}
+	if (!found)
+		// these are implbug()s because users shouldn't be able to get here directly; TODO?
+		implbug("invalid italic %d passed to dwriteAttrToAttr()", attr->ditalic);
+
+	found = false;
+	for (i = 0; ; i++) {
+		if (dwriteStretches[i].dwval == attr->dstretch) {
+			attr->stretch = dwriteStretches[i].uival;
+			found = true;
+			break;
+		}
+		if (dwriteStretches[i].lastOne)
+			break;
+	}
+	if (!found)
+		implbug("invalid stretch %d passed to dwriteAttrToAttr()", attr->dstretch);
+}
+
+uiDrawTextFont *uiDrawLoadClosestFont(const uiDrawTextFontDescriptor *desc)
+{
+	uiDrawTextFont *font;
+	IDWriteFontCollection *collection;
+	UINT32 index;
+	BOOL exists;
+	struct dwriteAttr attr;
+	IDWriteFontFamily *family;
+	WCHAR *wfamily;
+	IDWriteFont *match;
+	HRESULT hr;
+
+	// always get the latest available font information
+	hr = dwfactory->GetSystemFontCollection(&collection, TRUE);
 	if (hr != S_OK)
-		logHRESULT("error loading font in uiDrawLoadClosestFont()", hr);
+		logHRESULT(L"error getting system font collection", hr);
 
-	font->size = desc->Size;
+	wfamily = toUTF16(desc->Family);
+	hr = collection->FindFamilyName(wfamily, &index, &exists);
+	if (hr != S_OK)
+		logHRESULT(L"error finding font family", hr);
+	if (!exists)
+		implbug("LONGTERM family not found in uiDrawLoadClosestFont()", hr);
+	hr = collection->GetFontFamily(index, &family);
+	if (hr != S_OK)
+		logHRESULT(L"error loading font family", hr);
+
+	attr.weight = desc->Weight;
+	attr.italic = desc->Italic;
+	attr.stretch = desc->Stretch;
+	attrToDWriteAttr(&attr);
+	hr = family->GetFirstMatchingFont(
+		attr.dweight,
+		attr.dstretch,
+		attr.ditalic,
+		&match);
+	if (hr != S_OK)
+		logHRESULT(L"error loading font", hr);
+
+	font = mkTextFont(match,
+		FALSE,				// we own the initial reference; no need to add another one
+		wfamily, FALSE,		// will be freed with font
+		desc->Size);
 
 	family->Release();
 	collection->Release();
@@ -291,77 +317,37 @@ void uiDrawTextFontGetMetrics(uiDrawTextFont *font, uiDrawTextFontMetrics *metri
 	metrics->Ascent = scaleUnits(dm.ascent, dm.designUnitsPerEm, font->size);
 	metrics->Descent = scaleUnits(dm.descent, dm.designUnitsPerEm, font->size);
 	// TODO what happens if dm.xxx is negative?
+	// TODO remember what this was for
 	metrics->Leading = scaleUnits(dm.lineGap, dm.designUnitsPerEm, font->size);
 	metrics->UnderlinePos = scaleUnits(dm.underlinePosition, dm.designUnitsPerEm, font->size);
 	metrics->UnderlineThickness = scaleUnits(dm.underlineThickness, dm.designUnitsPerEm, font->size);
 }
 
-struct uiDrawTextLayout {
-	IDWriteTextFormat *format;
-	IDWriteTextLayout *layout;
-	intmax_t *bytesToCharacters;
+// some attributes, such as foreground color, can't be applied until after we establish a Direct2D context :/ so we have to prepare all attributes in advance
+// also since there's no way to clear the attributes from a layout en masse (apart from overwriting them all), we'll play it safe by creating a new layout each time
+enum layoutAttrType {
+	layoutAttrColor,
 };
 
-#define MBTWC(str, n, wstr, bufsiz) MultiByteToWideChar(CP_UTF8, 0, str, n, wstr, bufsiz)
-#define MBTWCErr(str, n, wstr, bufsiz) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, str, n, wstr, bufsiz)
+struct layoutAttr {
+	enum layoutAttrType type;
+	int start;
+	int end;
+	double components[4];
+};
 
-// TODO figure out how ranges are specified in DirectWrite
-// TODO clean up the local variable names and improve documentation
-static intmax_t *toUTF16Offsets(const char *str, WCHAR **wstr, intmax_t *wlenout)
-{
-	intmax_t *bytesToCharacters;
-	intmax_t i, len;
-	int wlen;
-	intmax_t outpos;
-
-	len = strlen(str);
-	bytesToCharacters = (intmax_t *) uiAlloc(len * sizeof (intmax_t), "intmax_t[]");
-
-	wlen = MBTWC(str, -1, NULL, 0);
-	if (wlen == 0)
-		logLastError("error figuring out number of characters to convert to in toUTF16Offsets()");
-	*wstr = (WCHAR *) uiAlloc(wlen * sizeof (WCHAR), "WCHAR[]");
-	*wlenout = wlen;
-
-	i = 0;
-	outpos = 0;
-	while (i < len) {
-		intmax_t n;
-		intmax_t j;
-		BOOL found;
-		int m;
-
-		// figure out how many characters to convert and convert them
-		found = FALSE;
-		for (n = 1; (i + n - 1) < len; n++) {
-			// we need MB_ERR_INVALID_CHARS here for this to work properly
-			m = MBTWCErr(str + i, n, *wstr + outpos, wlen - outpos);
-			if (m != 0) {			// found a full character
-				found = TRUE;
-				break;
-			}
-		}
-		// if this test passes we reached the end of the string without a successful conversion (invalid string)
-		if (!found)
-			logLastError("something bad happened when trying to prepare string in uiDrawNewTextLayout()");
-
-		// now save the character offsets for those bytes
-		for (j = 0; j < m; j++)
-			bytesToCharacters[j] = outpos;
-
-		// and go to the next
-		i += n;
-		outpos += m;
-	}
-
-	return bytesToCharacters;
-}
+struct uiDrawTextLayout {
+	WCHAR *text;
+	size_t textlen;
+	size_t *graphemes;
+	double width;
+	IDWriteTextFormat *format;
+	std::vector<struct layoutAttr> *attrs;
+};
 
 uiDrawTextLayout *uiDrawNewTextLayout(const char *text, uiDrawTextFont *defaultFont, double width)
 {
 	uiDrawTextLayout *layout;
-	WCHAR *wtext;
-	intmax_t wlen;
 	HRESULT hr;
 
 	layout = uiNew(uiDrawTextLayout);
@@ -379,77 +365,167 @@ uiDrawTextLayout *uiDrawNewTextLayout(const char *text, uiDrawTextFont *defaultF
 		L"",
 		&(layout->format));
 	if (hr != S_OK)
-		logHRESULT("error creating IDWriteTextFormat in uiDrawNewTextLayout()", hr);
-	// TODO small caps
-	// TODO gravity
+		logHRESULT(L"error creating IDWriteTextFormat", hr);
 
-	layout->bytesToCharacters = toUTF16Offsets(text, &wtext, &wlen);
-	hr = dwfactory->CreateTextLayout(wtext, wlen,
-		layout->format,
-		// FLOAT is float, not double, so this should work... TODO
-		FLT_MAX, FLT_MAX,
-		&(layout->layout));
-	if (hr != S_OK)
-		logHRESULT("error creating IDWriteTextLayout in uiDrawNewTextLayout()", hr);
-	uiFree(wtext);
+	layout->text = toUTF16(text);
+	layout->textlen = wcslen(layout->text);
+	layout->graphemes = graphemes(layout->text);
 
 	uiDrawTextLayoutSetWidth(layout, width);
+
+	layout->attrs = new std::vector<struct layoutAttr>;
 
 	return layout;
 }
 
 void uiDrawFreeTextLayout(uiDrawTextLayout *layout)
 {
-	layout->layout->Release();
+	delete layout->attrs;
 	layout->format->Release();
+	uiFree(layout->graphemes);
+	uiFree(layout->text);
 	uiFree(layout);
 }
 
-void uiDrawTextLayoutSetWidth(uiDrawTextLayout *layout, double width)
+static ID2D1SolidColorBrush *mkSolidBrush(ID2D1RenderTarget *rt, double r, double g, double b, double a)
 {
+	D2D1_BRUSH_PROPERTIES props;
+	D2D1_COLOR_F color;
+	ID2D1SolidColorBrush *brush;
+	HRESULT hr;
+
+	ZeroMemory(&props, sizeof (D2D1_BRUSH_PROPERTIES));
+	props.opacity = 1.0;
+	// identity matrix
+	props.transform._11 = 1;
+	props.transform._22 = 1;
+	color.r = r;
+	color.g = g;
+	color.b = b;
+	color.a = a;
+	hr = rt->CreateSolidColorBrush(
+		&color,
+		&props,
+		&brush);
+	if (hr != S_OK)
+		logHRESULT(L"error creating solid brush", hr);
+	return brush;
+}
+
+IDWriteTextLayout *prepareLayout(uiDrawTextLayout *layout, ID2D1RenderTarget *rt)
+{
+	IDWriteTextLayout *dl;
+	DWRITE_TEXT_RANGE range;
+	IUnknown *unkBrush;
 	DWRITE_WORD_WRAPPING wrap;
 	FLOAT maxWidth;
 	HRESULT hr;
 
+	hr = dwfactory->CreateTextLayout(layout->text, layout->textlen,
+		layout->format,
+		// FLOAT is float, not double, so this should work... TODO
+		FLT_MAX, FLT_MAX,
+		&dl);
+	if (hr != S_OK)
+		logHRESULT(L"error creating IDWriteTextLayout", hr);
+
+	for (const struct layoutAttr &attr : *(layout->attrs)) {
+		range.startPosition = layout->graphemes[attr.start];
+		range.length = layout->graphemes[attr.end] - layout->graphemes[attr.start];
+		switch (attr.type) {
+		case layoutAttrColor:
+			if (rt == NULL)		// determining extents, not drawing
+				break;
+			unkBrush = mkSolidBrush(rt,
+				attr.components[0],
+				attr.components[1],
+				attr.components[2],
+				attr.components[3]);
+			hr = dl->SetDrawingEffect(unkBrush, range);
+			unkBrush->Release();		// associated with dl
+			break;
+		default:
+			hr = E_FAIL;
+			logHRESULT(L"invalid text attribute type", hr);
+		}
+		if (hr != S_OK)
+			logHRESULT(L"error adding attribute to text layout", hr);
+	}
+
+	// and set the width
 	// this is the only wrapping mode (apart from "no wrap") available prior to Windows 8.1
 	wrap = DWRITE_WORD_WRAPPING_WRAP;
-	maxWidth = width;
-	if (width < 0) {
+	maxWidth = layout->width;
+	if (layout->width < 0) {
 		wrap = DWRITE_WORD_WRAPPING_NO_WRAP;
 		// setting the max width in this case technically isn't needed since the wrap mode will simply ignore the max width, but let's do it just to be safe
 		maxWidth = FLT_MAX;		// see TODO above
 	}
-	hr = layout->layout->SetWordWrapping(wrap);
+	hr = dl->SetWordWrapping(wrap);
 	if (hr != S_OK)
-		logHRESULT("error setting word wrapping mode in uiDrawTextLayoutSetWidth()", hr);
-	hr = layout->layout->SetMaxWidth(maxWidth);
+		logHRESULT(L"error setting word wrapping mode", hr);
+	hr = dl->SetMaxWidth(maxWidth);
 	if (hr != S_OK)
-		logHRESULT("error setting max layout width in uiDrawTextLayoutSetWidth()", hr);
+		logHRESULT(L"error setting max layout width", hr);
+
+	return dl;
+}
+
+
+void uiDrawTextLayoutSetWidth(uiDrawTextLayout *layout, double width)
+{
+	layout->width = width;
 }
 
 // TODO for a single line the height includes the leading; it should not
 void uiDrawTextLayoutExtents(uiDrawTextLayout *layout, double *width, double *height)
 {
+	IDWriteTextLayout *dl;
 	DWRITE_TEXT_METRICS metrics;
 	HRESULT hr;
 
-	hr = layout->layout->GetMetrics(&metrics);
+	dl = prepareLayout(layout, NULL);
+	hr = dl->GetMetrics(&metrics);
 	if (hr != S_OK)
-		logHRESULT("error getting layout metrics in uiDrawTextLayoutExtents()", hr);
+		logHRESULT(L"error getting layout metrics", hr);
 	*width = metrics.width;
 	// TODO make sure the behavior of this on empty strings is the same on all platforms
 	*height = metrics.height;
+	dl->Release();
 }
 
-void doDrawText(ID2D1RenderTarget *rt, ID2D1Brush *black, double x, double y, uiDrawTextLayout *layout)
+void uiDrawText(uiDrawContext *c, double x, double y, uiDrawTextLayout *layout)
 {
+	IDWriteTextLayout *dl;
 	D2D1_POINT_2F pt;
+	ID2D1Brush *black;
 	HRESULT hr;
 
+	// TODO document that fully opaque black is the default text color; figure out whether this is upheld in various scenarios on other platforms
+	black = mkSolidBrush(c->rt, 0.0, 0.0, 0.0, 1.0);
+
+	dl = prepareLayout(layout, c->rt);
 	pt.x = x;
 	pt.y = y;
 	// TODO D2D1_DRAW_TEXT_OPTIONS_NO_SNAP?
 	// TODO D2D1_DRAW_TEXT_OPTIONS_CLIP?
 	// TODO when setting 8.1 as minimum, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT?
-	rt->DrawTextLayout(pt, layout->layout, black, D2D1_DRAW_TEXT_OPTIONS_NONE);
+	c->rt->DrawTextLayout(pt, dl, black, D2D1_DRAW_TEXT_OPTIONS_NONE);
+	dl->Release();
+
+	black->Release();
+}
+
+void uiDrawTextLayoutSetColor(uiDrawTextLayout *layout, int startChar, int endChar, double r, double g, double b, double a)
+{
+	struct layoutAttr attr;
+
+	attr.type = layoutAttrColor;
+	attr.start = startChar;
+	attr.end = endChar;
+	attr.components[0] = r;
+	attr.components[1] = g;
+	attr.components[2] = b;
+	attr.components[3] = a;
+	layout->attrs->push_back(attr);
 }

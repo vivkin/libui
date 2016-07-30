@@ -1,7 +1,9 @@
 // 26 june 2015
 #import "uipriv_darwin.h"
 
-// TODO while a dialog is running no other window receives events
+// LONGTERM restructure this whole file
+// LONGTERM explicitly document this works as we want
+// LONGTERM note that font and color buttons also do this
 
 #define windowWindow(w) ((NSWindow *) uiControlHandle(uiControl(w)))
 

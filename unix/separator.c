@@ -7,21 +7,28 @@ struct uiSeparator {
 	GtkSeparator *separator;
 };
 
-uiUnixDefineControl(
-	uiSeparator,							// type name
-	uiSeparatorType						// type function
-)
+uiUnixControlAllDefaults(uiSeparator)
 
 uiSeparator *uiNewHorizontalSeparator(void)
 {
 	uiSeparator *s;
 
-	s = (uiSeparator *) uiNewControl(uiSeparatorType());
+	uiUnixNewControl(uiSeparator, s);
 
 	s->widget = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
 	s->separator = GTK_SEPARATOR(s->widget);
 
-	uiUnixFinishNewControl(s, uiSeparator);
+	return s;
+}
+
+uiSeparator *uiNewVerticalSeparator(void)
+{
+	uiSeparator *s;
+
+	uiUnixNewControl(uiSeparator, s);
+
+	s->widget = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+	s->separator = GTK_SEPARATOR(s->widget);
 
 	return s;
 }
