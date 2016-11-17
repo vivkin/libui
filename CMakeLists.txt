@@ -8,6 +8,7 @@ set(COMMON_SOURCES
   common/debug.c
   common/matrix.c
   common/shouldquit.c
+  common/table.c
   common/uipriv.h
   common/userbugs.c
   )
@@ -33,6 +34,7 @@ set(DARWIN_SOURCES
   darwin/form.m
   darwin/grid.m
   darwin/group.m
+  darwin/image.m
   darwin/label.m
   darwin/main.m
   darwin/map.m
@@ -46,10 +48,12 @@ set(DARWIN_SOURCES
   darwin/spinbox.m
   darwin/stddialogs.m
   darwin/tab.m
+  darwin/table.m
   darwin/text.m
   darwin/uipriv_darwin.h
   darwin/util.m
   darwin/window.m
+  darwin/winmoveresize.m
   )
 
 set(UNIX_SOURCES
@@ -198,6 +202,7 @@ target_link_libraries(histogram PRIVATE ui)
 
 add_executable(tests
   test/drawtests.c
+  test/images.c
   test/main.c
   test/menus.c
   test/page1.c
@@ -207,6 +212,7 @@ add_executable(tests
   test/page13.c
   test/page14.c
   test/page15.c
+  test/page16.c
   test/page2.c
   test/page3.c
   test/page4.c
@@ -219,7 +225,8 @@ add_executable(tests
   test/page8.c
   test/page9.c
   test/spaced.c
-  test/test.h)
+  test/test.h
+  )
 target_link_libraries(tests PRIVATE ui)
 
 install(TARGETS ui
